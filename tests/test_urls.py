@@ -31,6 +31,24 @@ class NormalizeTests(unittest.TestCase):
                     "https://e.org/" + "a" * 3000]:
             self.assertIsNone(normalize_url(bad), bad)
 
+    def test_protocol_relative_and_fragment_normalization(self):
+        self.assertEqual(
+            normalize_url("//Example.COM/path#section", base="https://example.org/"),
+            "https://example.com/path",
+        )
+        self.assertEqual(
+            normalize_url("#section", base="https://example.org/docs/page"),
+            "https://example.org/docs/page",
+        )
+
+    def test_query_normalization_keeps_non_tracking_parameters(self):
+        self.assertEqual(
+            normalize_url(
+                "https://example.org/search?utm_source=x&page=2&q=wadi#results"
+            ),
+            "https://example.org/search?page=2&q=wadi",
+        )
+
     def test_idna_and_misc(self):
         self.assertEqual(normalize_url("https://BÜCHER.example/"), "https://xn--bcher-kva.example/")
         self.assertEqual(site_key("WWW.Example.org."), "example.org")

@@ -50,6 +50,47 @@ class ExtractorTests(unittest.TestCase):
         self.assertTrue(p.noindex)
         self.assertEqual(p.links, ["https://example.org/home", "https://example.org/floods"])  # dedup, no mailto/js/nofollow-link
 
+    def test_base_href_controls_relative_link_resolution(self):
+        html = """
+        <html><head>
+          <base href="/assets/">
+        </head><body>
+          <a href="one">one</a>
+          <a href="../two">two</a>
+        </body></html>
+        """
+        p = extract(html, "https://example.org/docs/page")
+        self.assertEqual(
+            p.links,
+            ["https://example.org/assets/one", "https://example.org/two"],
+        )
+
+    def test_invalid_base_href_falls_back_to_page_url(self):
+        html = """
+        <html><head>
+          <base href="javascript:void(0)">
+        </head><body>
+          <a href="child">child</a>
+        </body></html>
+        """
+        p = extract(html, "https://example.org/docs/page")
+        self.assertEqual(p.links, ["https://example.org/docs/child"])
+
+    def test_protocol_relative_and_ignored_link_schemes(self):
+        html = """
+        <html><body>
+          <a href="//example.org/one">one</a>
+          <a href="mailto:test@example.org">mail</a>
+          <a href="javascript:void(0)">js</a>
+          <a href="tel:+123456789">tel</a>
+          <a href="data:text/plain,hello">data</a>
+          <a href="#section">fragment</a>
+          <a href="">empty</a>
+        </body></html>
+        """
+        p = extract(html, "https://example.org/docs/page")
+        self.assertEqual(p.links, ["https://example.org/one"])
+
     def test_fallbacks(self):
         p = extract("<html><body><h1>Only H1</h1><p>short body</p></body></html>", "https://e.org/")
         self.assertEqual(p.title, "Only H1")

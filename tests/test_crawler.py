@@ -49,6 +49,66 @@ class CrawlerTests(TempDirCase):
             self.assertEqual((run["state"], run["stored"]), ("finished", 4))
             self.assertTrue(self.storage.recent_crawl_errors())
 
+    def test_canonical_url_is_discovered_and_crawled(self):
+        routes = site_routes()
+        routes["/"] = (
+            200,
+            *page(
+                "Home",
+                "Home page that points to a canonical destination.",
+                '<link rel="canonical" href="/canonical-destination">',
+            ),
+        )
+        routes["/canonical-destination"] = (
+            200,
+            *page("Canonical", "The canonical destination was discovered."),
+        )
+
+        with MockSite(routes) as site:
+            stats, _ = self.run_crawl(
+                site,
+                env_kw={"max_depth": 1},
+            )
+
+            self.assertIn("/canonical-destination", site.hits)
+            self.assertIn(
+                "Canonical",
+                {d.title for d in self.storage.get_documents(range(1, 20)).values()},
+            )
+            self.assertGreaterEqual(stats.stored, 2)
+
+    def test_queue_growth_bound_is_respected(self):
+        routes = site_routes()
+        links = [f"/generated/{i}" for i in range(20)]
+        routes["/"] = (
+            200,
+            *page(
+                "Home",
+                "Page containing many discovered URLs.",
+                links=links,
+            ),
+        )
+        for i in range(20):
+            routes[f"/generated/{i}"] = (
+                200,
+                *page(f"Generated {i}", f"Generated page {i}."),
+            )
+
+        with MockSite(routes) as site:
+            self.run_crawl(
+                site,
+                seeds=[Seed(site.base + "/", max_pages=2)],
+                env_kw={"max_depth": 1},
+            )
+
+            with self.storage._conn() as c:
+                count = c.execute(
+                    "SELECT count(*) FROM urls WHERE domain=?",
+                    ("127.0.0.1",),
+                ).fetchone()[0]
+
+            self.assertLessEqual(count, 10)
+
     def test_percent_encoded_robots_rule_is_honoured_end_to_end(self):
         """Regression for the %7E bug: crawler normalises links, robots rule is written in encoded form."""
         routes = site_routes()

@@ -101,7 +101,10 @@ def extract(content: Union[bytes, str], base_url: str, content_type: Optional[st
     for a in soup.find_all("a", href=True):
         if "nofollow" in [r.lower() for r in (a.get("rel") or [])]:
             continue
-        u = normalize_url(a["href"], base=base)
+        href = a["href"].strip()
+        if href.startswith("#"):
+            continue
+        u = normalize_url(href, base=base)
         if u and u not in seen:
             seen.add(u)
             page.links.append(u)

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from ..storage.base import Document, Storage, now_iso
 from .extractor import extract
+from .feed import parse_feed
 from .lock import CrawlLock
 from .robots import parse_x_robots_tag
 from .sitemap import MAX_SITEMAP_XML_BYTES, parse_sitemap
@@ -301,6 +302,39 @@ class Crawler:
                 if normalized:
                     pending.append(normalized)
 
+    def _discover_feeds(self, feed_urls, item, cfg, scope):
+        """Fetch discovered RSS/Atom feeds and enqueue their page URLs safely."""
+        if item.depth >= cfg.max_depth:
+            return
+
+        seen = set()
+        for feed_url in feed_urls:
+            if feed_url in seen:
+                continue
+            seen.add(feed_url)
+
+            normalized = normalize_url(feed_url)
+            if not normalized or not scope.allows(normalized):
+                continue
+            if not self.robots.is_allowed(normalized):
+                continue
+
+            res = self.fetcher.fetch(
+                normalized,
+                accept_types={"application/rss+xml", "application/atom+xml", "application/xml", "text/xml"},
+                max_bytes=min(self.s.max_response_bytes, 2 * 1024 * 1024),
+                redirect_filter=scope.allows,
+            )
+            if not res.ok:
+                continue
+
+            try:
+                document = parse_feed(res.body, res.final_url or normalized)
+            except ValueError:
+                continue
+
+            self._enqueue_links(list(document.urls), item, cfg, scope)
+
     # ------------------------------------------------------------------ one URL
     def _finish(self, run_id, url, outcome, queue_status, http=None, ms=None, error=None):
         self.storage.mark_url(url, queue_status, http, error)
@@ -376,6 +410,7 @@ class Crawler:
         if canonical != final and not nofollow:
             links.append(canonical)
         self._enqueue_links(links, item, cfg, scope)
+        self._discover_feeds(page.feed_links, item, cfg, scope)
         self._discover_sitemaps(final, item, cfg, scope)
 
         if noindex:

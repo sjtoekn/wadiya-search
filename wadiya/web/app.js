@@ -38,11 +38,22 @@
     site.appendChild(el('b', null, r.domain)); site.appendChild(document.createTextNode(' · ' + r.url));
     var h = el('h2'), href = safeHttpUrl(r.url), a = el(href ? 'a' : 'span');
     a.textContent = r.title || r.url;
-    if (href) { a.href = href; a.rel = 'noopener noreferrer nofollow'; }
+    if (href) {
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer nofollow';
+    }
     h.appendChild(a);
     var p = el('p');
     splitForHighlight(r.snippet || '', terms).forEach(function (part) { p.appendChild(part.hit ? el('mark', null, part.text) : document.createTextNode(part.text)); });
-    li.appendChild(site); li.appendChild(h); li.appendChild(p);
+    var discover = el('a', 'discover-link', 'Discover website');
+    discover.href = '/discovery?domain=' + encodeURIComponent(r.domain);
+    discover.setAttribute('aria-label', 'Discover ' + (r.domain || 'this website'));
+
+    li.appendChild(h);
+    li.appendChild(site);
+    li.appendChild(p);
+    li.appendChild(discover);
     return li;
   }
   function renderPager(d) {

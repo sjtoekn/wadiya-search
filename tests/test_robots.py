@@ -80,6 +80,20 @@ class CheckerTests(unittest.TestCase):
         c.is_allowed("https://e.org/ok")
         self.assertEqual(self.f.calls, 2)   # TTL expiry refetches
 
+    def test_invalid_crawl_delay_values_are_ignored(self):
+        for value in ("-1", "not-a-number", "nan"):
+            rules = parse_robots(
+                f"User-agent: *\nCrawl-delay: {value}\n",
+                "WadiyaBot",
+            )
+            self.assertIsNone(rules.delay, value)
+
+        rules = parse_robots(
+            "User-agent: *\nCrawl-delay: 999999\n",
+            "WadiyaBot",
+        )
+        self.assertEqual(rules.delay, 999999.0)
+
     def test_missing_robots_allows(self):
         self.assertTrue(self.checker(status=404).is_allowed("https://e.org/x"))
 

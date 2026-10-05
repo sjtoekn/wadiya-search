@@ -27,6 +27,7 @@ class ExtractedPage:
     canonical_url: Optional[str] = None
     language: Optional[str] = None
     links: list = field(default_factory=list)
+    feed_links: list = field(default_factory=list)
     noindex: bool = False
     nofollow: bool = False
 
@@ -92,10 +93,18 @@ def extract(content: Union[bytes, str], base_url: str, content_type: Optional[st
     if bt:
         base = normalize_url(bt["href"], base=base_url) or base_url
 
+    seen_feeds = set()
     for link in soup.find_all("link", href=True):
         rel = [r.lower() for r in (link.get("rel") or [])]
         if "canonical" in rel and not page.canonical_url:
             page.canonical_url = normalize_url(link["href"], base=base)
+
+        link_type = (link.get("type") or "").lower().split(";", 1)[0].strip()
+        if "alternate" in rel and link_type in ("application/rss+xml", "application/atom+xml"):
+            feed_url = normalize_url(link["href"], base=base)
+            if feed_url and feed_url not in seen_feeds:
+                seen_feeds.add(feed_url)
+                page.feed_links.append(feed_url)
 
     seen = set()
     for a in soup.find_all("a", href=True):

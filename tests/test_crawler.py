@@ -208,6 +208,76 @@ class CrawlerTests(TempDirCase):
             self.assertEqual(self.storage.count_documents(), docs_before)   # nothing new stored
             self.assertTrue(any("unsafe_url" in (r["error"] or "") for r in self._log()))
 
+    def test_seed_file_loading_rejects_invalid_entries(self):
+        p = os.path.join(self.tmp, "invalid-seeds.yaml")
+        with open(p, "w") as f:
+            f.write("""seeds:
+  - url: https://a.org/
+    max_pages: -1
+  - url: https://b.org/
+    max_depth: -1
+  - url: https://c.org/
+    max_pages: 1.5
+  - max_pages: 5
+  - url: javascript:alert(1)
+""")
+        seeds = load_seeds(p)
+        self.assertEqual(seeds, [])
+
+    def test_path_prefix_is_normalized_and_boundary_safe(self):
+        from wadiya.crawler.seeds import Scope
+
+        scope = Scope(
+            [
+                Seed("https://example.org/docs/", path_prefix="/docs"),
+            ],
+            self.settings,
+        )
+
+        self.assertTrue(scope.allows("https://example.org/docs"))
+        self.assertTrue(scope.allows("https://example.org/docs/page"))
+        self.assertFalse(scope.allows("https://example.org/docs-evil"))
+        self.assertFalse(scope.allows("https://example.org/other"))
+
+    def test_scope_merges_multiple_seeds_for_same_site(self):
+        from wadiya.crawler.seeds import Scope
+
+        scope = Scope(
+            [
+                Seed("https://example.org/docs/", max_pages=10, max_depth=1, path_prefix="/docs"),
+                Seed("https://example.org/blog/", max_pages=20, max_depth=3, path_prefix="/blog"),
+            ],
+            self.settings,
+        )
+
+        cfg = scope.config("example.org")
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.max_pages, 20)
+        self.assertEqual(cfg.max_depth, 3)
+        self.assertFalse(cfg.whole_site)
+
+        self.assertTrue(scope.allows("https://example.org/docs/page"))
+        self.assertTrue(scope.allows("https://example.org/blog/post"))
+        self.assertFalse(scope.allows("https://example.org/private"))
+
+    def test_scope_whole_site_seed_overrides_path_restrictions(self):
+        from wadiya.crawler.seeds import Scope
+
+        scope = Scope(
+            [
+                Seed("https://example.org/docs/", path_prefix="/docs"),
+                Seed("https://example.org/", max_pages=20),
+            ],
+            self.settings,
+        )
+
+        cfg = scope.config("example.org")
+        self.assertIsNotNone(cfg)
+        self.assertTrue(cfg.whole_site)
+
+        self.assertTrue(scope.allows("https://example.org/docs/page"))
+        self.assertTrue(scope.allows("https://example.org/private"))
+
     def test_seed_file_loading(self):
         p = os.path.join(self.tmp, "seeds.yaml")
         with open(p, "w") as f:
@@ -218,6 +288,43 @@ class CrawlerTests(TempDirCase):
     def _log(self):
         with self.storage._conn() as c:
             return [dict(r) for r in c.execute("SELECT * FROM crawl_log")]
+
+
+class FeedDiscoveryTests(TempDirCase):
+    def test_html_feed_link_enqueues_feed_urls(self):
+        routes = site_routes()
+        routes["/"] = (
+            200,
+            "text/html",
+            """<html><head>
+              <title>Home</title>
+              <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+            </head><body><main>Feed discovery test page with enough content for crawling.</main></body></html>""",
+            {},
+        )
+        routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            """<?xml version="1.0"?>
+            <rss version="2.0"><channel>
+              <title>Test Feed</title>
+              <item><link>{base}/feed-page</link></item>
+            </channel></rss>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            routes["/feed.xml"] = tuple(
+                x.replace("{base}", site.base) if isinstance(x, str) else x
+                for x in routes["/feed.xml"]
+            )
+            stats = Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertGreaterEqual(stats.attempted, 1)
+        self.assertIn("/feed.xml", site.hits)
+        self.assertIn("/feed-page", site.hits)
 
 
 class SitemapDiscoveryTests(TempDirCase):

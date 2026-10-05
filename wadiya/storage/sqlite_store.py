@@ -237,6 +237,34 @@ class SQLiteStorage(Storage):
         with self._conn() as c:
             return c.execute("SELECT count(DISTINCT domain) FROM documents WHERE status='ok'").fetchone()[0]
 
+    def get_domain_discovery(self, domain: str) -> dict | None:
+        with self._conn() as c:
+            summary = c.execute(
+                "SELECT domain, count(*) AS page_count, "
+                "min(crawled_at) AS first_crawled, max(crawled_at) AS last_crawled "
+                "FROM documents WHERE status='ok' AND domain=? "
+                "GROUP BY domain",
+                (domain,),
+            ).fetchone()
+
+            if not summary:
+                return None
+
+            pages = c.execute(
+                "SELECT url, title, description, language, crawled_at "
+                "FROM documents WHERE status='ok' AND domain=? "
+                "ORDER BY id",
+                (domain,),
+            ).fetchall()
+
+            return {
+                "domain": summary["domain"],
+                "page_count": summary["page_count"],
+                "first_crawled": summary["first_crawled"],
+                "last_crawled": summary["last_crawled"],
+                "pages": [dict(row) for row in pages],
+            }
+
     # ------------------------------------------------------------------ queue
     def enqueue(self, url: str, domain: str, depth: int, force: bool = False) -> bool:
         with self._conn(write=True) as c:

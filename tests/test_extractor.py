@@ -91,6 +91,24 @@ class ExtractorTests(unittest.TestCase):
         p = extract(html, "https://example.org/docs/page")
         self.assertEqual(p.links, ["https://example.org/one"])
 
+    def test_feed_links(self):
+        html = """
+        <html><head>
+          <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+          <link rel="alternate" type="application/atom+xml" href="https://example.org/atom.xml">
+          <link rel="alternate" type="text/html" href="/page">
+          <link rel="alternate" type="application/rss+xml" href="/feed.xml">
+        </head><body></body></html>
+        """
+        p = extract(html, "https://example.org/docs/page")
+        self.assertEqual(
+            p.feed_links,
+            [
+                "https://example.org/feed.xml",
+                "https://example.org/atom.xml",
+            ],
+        )
+
     def test_fallbacks(self):
         p = extract("<html><body><h1>Only H1</h1><p>short body</p></body></html>", "https://e.org/")
         self.assertEqual(p.title, "Only H1")

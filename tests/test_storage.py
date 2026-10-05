@@ -58,6 +58,48 @@ class StorageTests(TempDirCase):
         self.assertTrue(s.enqueue("https://b.org/", "b.org", 0, force=True))  # re-crawl
         self.assertEqual(s.queue_size(), 2)
 
+    def test_queue_claim_order_is_depth_then_id(self):
+        s = self.storage
+        s.enqueue("https://example.org/deep", "example.org", 2)
+        s.enqueue("https://example.org/shallow", "example.org", 0)
+        s.enqueue("https://example.org/mid", "example.org", 1)
+
+        first = s.claim_next()
+        self.assertEqual(first.url, "https://example.org/shallow")
+
+        s.mark_url(first.url, "done", 200)
+
+        second = s.claim_next()
+        self.assertEqual(second.url, "https://example.org/mid")
+
+    def test_force_enqueue_preserves_shallower_depth(self):
+        s = self.storage
+        s.enqueue("https://example.org/page", "example.org", 1)
+
+        self.assertTrue(
+            s.enqueue("https://example.org/page", "example.org", 3, force=True)
+        )
+
+        item = s.claim_next()
+        self.assertEqual(item.depth, 1)
+
+    def test_requeue_stale_recovers_in_progress_items(self):
+        s = self.storage
+        self.assertTrue(
+            s.enqueue("https://example.org/stale", "example.org", 0)
+        )
+
+        item = s.claim_next()
+        self.assertIsNotNone(item)
+        self.assertEqual(s.queue_size(), 0)
+
+        self.assertEqual(s.requeue_stale(), 1)
+        self.assertEqual(s.queue_size(), 1)
+
+        recovered = s.claim_next()
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.url, "https://example.org/stale")
+
     def test_run_and_query_metrics(self):
         s = self.storage
         rid = s.start_run()

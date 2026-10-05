@@ -65,6 +65,15 @@ def create_app(settings=None, storage=None, indexer=None, ranker=None) -> FastAP
         status, body = handlers.handle_search(service, q, page)
         return JSONResponse(body, status_code=status)
 
+    @app.get("/api/discovery")
+    def discovery(domain: str = ""):
+        status, body = handlers.handle_discovery(storage, domain)
+        return JSONResponse(body, status_code=status)
+
+    @app.get("/discovery", include_in_schema=False)
+    def discovery_page():
+        return FileResponse(WEB_DIR / "discovery.html")
+
     @app.get("/api/health")
     def health():
         return {"status": "ok"}

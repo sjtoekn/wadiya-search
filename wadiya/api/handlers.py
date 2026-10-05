@@ -31,3 +31,21 @@ def handle_login(auth, password, client_key: str) -> tuple:
 
 def handle_stats(storage, indexer) -> tuple:
     return 200, build_stats(storage, indexer)
+
+
+def handle_discovery(storage, domain: str) -> tuple:
+    if not isinstance(domain, str):
+        return error(400, "domain is required")
+
+    domain = domain.strip().lower().rstrip(".")
+    if not domain:
+        return error(400, "domain is required")
+
+    if len(domain) > 253 or any(ch.isspace() for ch in domain):
+        return error(400, "invalid domain")
+
+    result = storage.get_domain_discovery(domain)
+    if result is None:
+        return error(404, "website not found")
+
+    return 200, result

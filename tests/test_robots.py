@@ -162,3 +162,86 @@ class XRobotsTagParserTests(unittest.TestCase):
         self.assertEqual((c.block_reason("https://e.org/no/x"), c.block_reason("https://e.org/ok")), ("rules", None))
         self.assertEqual(RobotsChecker(FakeFetcher(status=503), "WadiyaBot").block_reason("https://e.org/ok"), "unavailable")
         self.assertEqual(RobotsChecker(FakeFetcher(error="timeout"), "WadiyaBot").block_reason("https://e.org/ok"), "unavailable")
+
+
+class SitemapDirectiveTests(unittest.TestCase):
+    def test_sitemap_directive_is_collected(self):
+        text = """
+        Sitemap: https://example.org/sitemap.xml
+
+        User-agent: *
+        Disallow: /private/
+        """
+        rules = parse_robots(text, "WadiyaBot")
+
+        self.assertEqual(
+            rules.sitemaps,
+            ("https://example.org/sitemap.xml",),
+        )
+        self.assertFalse(rules.allowed("/private/page"))
+        self.assertTrue(rules.allowed("/public/page"))
+
+    def test_multiple_sitemap_directives_are_preserved_and_deduplicated(self):
+        text = """
+        Sitemap: https://example.org/sitemap-a.xml
+        Sitemap: https://example.org/sitemap-b.xml
+        Sitemap: https://example.org/sitemap-a.xml
+
+        User-agent: *
+        Crawl-delay: 2
+        """
+        rules = parse_robots(text, "WadiyaBot")
+
+        self.assertEqual(
+            rules.sitemaps,
+            (
+                "https://example.org/sitemap-a.xml",
+                "https://example.org/sitemap-b.xml",
+            ),
+        )
+        self.assertEqual(rules.delay, 2.0)
+
+    def test_sitemap_directive_is_not_tied_to_user_agent_group(self):
+        text = """
+        User-agent: OtherBot
+        Disallow: /other/
+
+        Sitemap: https://example.org/sitemap.xml
+
+        User-agent: WadiyaBot
+        Disallow: /private/
+        """
+        rules = parse_robots(text, "WadiyaBot")
+
+        self.assertEqual(
+            rules.sitemaps,
+            ("https://example.org/sitemap.xml",),
+        )
+        self.assertFalse(rules.allowed("/private/page"))
+        self.assertTrue(rules.allowed("/other/page"))
+
+
+class SitemapCheckerTests(unittest.TestCase):
+    def test_checker_exposes_sitemap_urls_from_robots(self):
+        fetcher = FakeFetcher(
+            body=b"""
+            User-agent: *
+            Disallow: /private/
+
+            Sitemap: https://example.org/sitemap.xml
+            Sitemap: https://example.org/news.xml
+            """
+        )
+        checker = RobotsChecker(fetcher, "WadiyaBot")
+
+        self.assertEqual(
+            checker.sitemap_urls("https://example.org/page"),
+            (
+                "https://example.org/sitemap.xml",
+                "https://example.org/news.xml",
+            ),
+        )
+
+        # The existing robots behavior must still work.
+        self.assertFalse(checker.is_allowed("https://example.org/private/page"))
+        self.assertTrue(checker.is_allowed("https://example.org/public/page"))

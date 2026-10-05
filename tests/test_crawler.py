@@ -218,3 +218,230 @@ class CrawlerTests(TempDirCase):
     def _log(self):
         with self.storage._conn() as c:
             return [dict(r) for r in c.execute("SELECT * FROM crawl_log")]
+
+
+class SitemapDiscoveryTests(TempDirCase):
+    def test_conventional_sitemap_enqueues_pages(self):
+        routes = site_routes()
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            """<?xml version="1.0"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{base}/sitemap-a</loc></url>
+              <url><loc>{base}/sitemap-b</loc></url>
+            </urlset>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            status, ctype, body, headers = routes["/sitemap.xml"]
+            routes["/sitemap.xml"] = (
+                status,
+                ctype,
+                body.replace("{base}", site.base),
+                headers,
+            )
+
+            stats = Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertGreaterEqual(stats.attempted, 1)
+        self.assertIn("/sitemap.xml", site.hits)
+        self.assertIn("/sitemap-a", site.hits)
+        self.assertIn("/sitemap-b", site.hits)
+
+    def test_robots_sitemap_directive_is_discovered(self):
+        routes = site_routes()
+        routes["/robots.txt"] = (
+            200,
+            "text/plain",
+            "User-agent: *\nAllow: /\nSitemap: {base}/robots-map.xml\n",
+            {},
+        )
+        routes["/robots-map.xml"] = (
+            200,
+            "application/xml",
+            """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{base}/robots-page</loc></url>
+            </urlset>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            routes["/robots.txt"] = tuple(
+                x.replace("{base}", site.base) if isinstance(x, str) else x
+                for x in routes["/robots.txt"]
+            )
+            routes["/robots-map.xml"] = tuple(
+                x.replace("{base}", site.base) if isinstance(x, str) else x
+                for x in routes["/robots-map.xml"]
+            )
+            stats = Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertGreaterEqual(stats.attempted, 1)
+        self.assertIn("/robots-map.xml", site.hits)
+        self.assertIn("/robots-page", site.hits)
+
+    def test_sitemap_index_and_nested_index_are_processed(self):
+        routes = site_routes()
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            """<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <sitemap><loc>{base}/nested-index.xml</loc></sitemap>
+            </sitemapindex>""",
+            {},
+        )
+        routes["/nested-index.xml"] = (
+            200,
+            "application/xml",
+            """<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <sitemap><loc>{base}/pages.xml</loc></sitemap>
+            </sitemapindex>""",
+            {},
+        )
+        routes["/pages.xml"] = (
+            200,
+            "application/xml",
+            """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{base}/nested-page</loc></url>
+            </urlset>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            for path in ("/sitemap.xml", "/nested-index.xml", "/pages.xml"):
+                status, ctype, body, headers = routes[path]
+                routes[path] = (
+                    status,
+                    ctype,
+                    body.replace("{base}", site.base),
+                    headers,
+                )
+
+            stats = Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertGreaterEqual(stats.attempted, 1)
+        self.assertIn("/nested-index.xml", site.hits)
+        self.assertIn("/pages.xml", site.hits)
+        self.assertIn("/nested-page", site.hits)
+
+    def test_sitemap_external_url_is_not_fetched(self):
+        routes = site_routes()
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>https://elsewhere.invalid/outside</loc></url>
+            </urlset>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertNotIn("/outside", site.hits)
+        self.assertNotIn("https://elsewhere.invalid/outside", site.hits)
+
+    def test_sitemap_page_disallowed_by_robots_is_not_crawled(self):
+        routes = site_routes()
+        routes["/robots.txt"] = (
+            200,
+            "text/plain",
+            "User-agent: *\nAllow: /\nDisallow: /blocked-from-sitemap\nSitemap: {base}/sitemap.xml\n",
+            {},
+        )
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{base}/allowed-from-sitemap</loc></url>
+              <url><loc>{base}/blocked-from-sitemap</loc></url>
+            </urlset>""",
+            {},
+        )
+        routes["/allowed-from-sitemap"] = (
+            200,
+            *page("Allowed sitemap page", "This page may be crawled."),
+        )
+        routes["/blocked-from-sitemap"] = (
+            200,
+            *page("Blocked sitemap page", "This page must not be crawled."),
+        )
+
+        with MockSite(routes) as site:
+            routes["/robots.txt"] = tuple(
+                x.replace("{base}", site.base) if isinstance(x, str) else x
+                for x in routes["/robots.txt"]
+            )
+            routes["/sitemap.xml"] = tuple(
+                x.replace("{base}", site.base) if isinstance(x, str) else x
+                for x in routes["/sitemap.xml"]
+            )
+
+            Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertIn("/allowed-from-sitemap", site.hits)
+        self.assertNotIn("/blocked-from-sitemap", site.hits)
+
+    def test_sitemap_discovery_works_with_nofollow_page(self):
+        routes = site_routes()
+        routes["/nofollow"] = (
+            200,
+            *page(
+                "No follow",
+                "Sitemap must still be discovered.",
+                '<meta name="robots" content="nofollow">',
+            ),
+        )
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            """<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{base}/from-sitemap</loc></url>
+            </urlset>""",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            status, ctype, body, headers = routes["/sitemap.xml"]
+            routes["/sitemap.xml"] = (
+                status,
+                ctype,
+                body.replace("{base}", site.base),
+                headers,
+            )
+
+            Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/nofollow")], fresh=True
+            )
+
+        self.assertIn("/sitemap.xml", site.hits)
+        self.assertIn("/from-sitemap", site.hits)
+
+    def test_malformed_sitemap_is_ignored(self):
+        routes = site_routes()
+        routes["/sitemap.xml"] = (
+            200,
+            "application/xml",
+            "<urlset><url><loc>broken",
+            {},
+        )
+
+        with MockSite(routes) as site:
+            stats = Env(self.settings, site).crawler(self.storage).run(
+                [Seed(site.base + "/")], fresh=True
+            )
+
+        self.assertGreaterEqual(stats.attempted, 1)
+        self.assertNotIn("/broken", site.hits)

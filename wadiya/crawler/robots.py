@@ -28,10 +28,12 @@ MAX_WILDCARDS = 8
 
 
 class RobotsRules:
-    def __init__(self, rules=None, delay: Optional[float] = None, disallow_all=False, unavailable=False):
+    def __init__(self, rules=None, delay: Optional[float] = None, disallow_all=False,
+                 unavailable=False, sitemaps=None):
         self.delay = delay
         self.disallow_all = disallow_all
         self.unavailable = unavailable      # True when 'disallow all' only means robots.txt could not be fetched
+        self.sitemaps = tuple(sitemaps or ())
         self._rules = []
         for allow, pattern in (rules or [])[:MAX_RULES]:
             pattern = canonical_path(pattern)     # same canonical form as the URL path (specificity measured after this)
@@ -56,12 +58,21 @@ class RobotsRules:
 def parse_robots(text: str, token: str) -> RobotsRules:
     token = token.lower()
     groups, cur, last_agent = [], None, False
+    sitemaps = []
+    seen_sitemaps = set()
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].strip()
         if ":" not in line:
             continue
         key, value = (s.strip() for s in line.split(":", 1))
         key = key.lower()
+        if key == "sitemap":
+            if value:
+                sitemap = value.strip()
+                if sitemap and sitemap not in seen_sitemaps:
+                    seen_sitemaps.add(sitemap)
+                    sitemaps.append(sitemap)
+            continue
         if key == "user-agent":
             if cur is None or not last_agent:
                 cur = {"agents": [], "rules": [], "delay": None}
@@ -85,7 +96,7 @@ def parse_robots(text: str, token: str) -> RobotsRules:
     chosen = [g for g in groups if token in g["agents"]] or [g for g in groups if "*" in g["agents"]]
     rules = [r for g in chosen for r in g["rules"]]
     delay = next((g["delay"] for g in chosen if g["delay"] is not None), None)
-    return RobotsRules(rules, delay)
+    return RobotsRules(rules, delay, sitemaps=sitemaps)
 
 
 class RobotsChecker:
@@ -133,6 +144,10 @@ class RobotsChecker:
 
     def crawl_delay(self, url: str) -> Optional[float]:
         return self._rules_for(url).delay
+
+    def sitemap_urls(self, url: str) -> tuple:
+        """Return sitemap URLs declared by the origin's robots.txt."""
+        return self._rules_for(url).sitemaps
 
 
 _XRT_DIRECTIVES = {"all", "none", "noindex", "nofollow", "noarchive", "nosnippet", "notranslate", "noimageindex",

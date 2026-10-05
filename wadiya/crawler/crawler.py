@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from ..storage.base import Document, Storage, now_iso
 from .extractor import extract
 from .lock import CrawlLock
 from .robots import parse_x_robots_tag
+from .sitemap import MAX_SITEMAP_XML_BYTES, parse_sitemap
 from .urls import looks_crawlable, normalize_url, site_key
 
 
@@ -40,6 +42,10 @@ class Crawler:
         self.lock_path = lock_path or (settings.db_path + ".crawl.lock")
         self._clock, self._sleep = clock, sleep
         self._ready_at = {}
+        self._sitemap_lock = threading.Lock()
+        self._sitemaps_seen = set()
+        self._sitemap_pages_seen = set()
+        self._sitemap_pages_enqueued = 0
 
     # ------------------------------------------------------------------ run loop
     def run(self, seeds, fresh: bool = False) -> CrawlStats:
@@ -52,6 +58,10 @@ class Crawler:
 
         scope = Scope(seeds, self.s)
         self._ready_at = {}
+        with self._sitemap_lock:
+            self._sitemaps_seen.clear()
+            self._sitemap_pages_seen.clear()
+            self._sitemap_pages_enqueued = 0
         self.storage.requeue_stale()
         if fresh:
             self.storage.reset_queue()
@@ -196,6 +206,101 @@ class Crawler:
         target.fetch_ms_total += source.fetch_ms_total
         target.fetch_count += source.fetch_count
 
+    # --------------------------------------------------------------- sitemaps
+    def _sitemap_resource_allowed(self, url, scope):
+        normalized = normalize_url(url)
+        if not normalized or not scope.allows(normalized):
+            return None
+        if self.fetcher.validate(normalized):
+            return None
+        return normalized
+
+    def _sitemap_urls_for(self, url, scope):
+        """Return normalized sitemap candidates declared by robots plus /sitemap.xml."""
+        candidates = list(self.robots.sitemap_urls(url))
+        parts = urlsplit(url)
+        if parts.scheme and parts.netloc:
+            candidates.append(f"{parts.scheme}://{parts.netloc}/sitemap.xml")
+
+        result = []
+        seen = set()
+        for candidate in candidates:
+            normalized = self._sitemap_resource_allowed(candidate, scope)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+        return result
+
+    def _enqueue_sitemap_pages(self, urls, item, cfg, scope):
+        if item.depth >= cfg.max_depth:
+            return
+
+        depth = item.depth + 1
+        for url in urls:
+            if not looks_crawlable(url) or not scope.allows(url):
+                continue
+
+            if not self.robots.is_allowed(url):
+                continue
+
+            site = site_key(urlsplit(url).hostname)
+            site_cfg = scope.config(site)
+            if site_cfg is None:
+                continue
+
+            if self.storage.domain_url_count(site) >= site_cfg.max_pages * 5:
+                continue
+
+            with self._sitemap_lock:
+                if url in self._sitemap_pages_seen:
+                    continue
+                if self._sitemap_pages_enqueued >= 100_000:
+                    continue
+                self._sitemap_pages_seen.add(url)
+                self._sitemap_pages_enqueued += 1
+
+            self.storage.enqueue(url, site, depth)
+
+    def _discover_sitemaps(self, url, item, cfg, scope):
+        """Discover sitemap resources and enqueue their page URLs safely."""
+        if item.depth >= cfg.max_depth:
+            return
+
+        pending = self._sitemap_urls_for(url, scope)
+
+        while pending:
+            sitemap_url = pending.pop(0)
+
+            with self._sitemap_lock:
+                if sitemap_url in self._sitemaps_seen:
+                    continue
+                if len(self._sitemaps_seen) >= 64:
+                    continue
+                self._sitemaps_seen.add(sitemap_url)
+
+            res = self.fetcher.fetch(
+                sitemap_url,
+                accept_types={"application/xml", "text/xml"},
+                max_bytes=min(self.s.max_response_bytes, MAX_SITEMAP_XML_BYTES),
+                redirect_filter=scope.allows,
+            )
+            if not res.ok:
+                continue
+
+            try:
+                document = parse_sitemap(res.body, res.final_url or sitemap_url)
+            except ValueError:
+                continue
+
+            if document.kind == "urlset":
+                self._enqueue_sitemap_pages(document.urls, item, cfg, scope)
+                continue
+
+            for nested in document.urls:
+                normalized = self._sitemap_resource_allowed(nested, scope)
+                if normalized:
+                    pending.append(normalized)
+
     # ------------------------------------------------------------------ one URL
     def _finish(self, run_id, url, outcome, queue_status, http=None, ms=None, error=None):
         self.storage.mark_url(url, queue_status, http, error)
@@ -271,6 +376,7 @@ class Crawler:
         if canonical != final and not nofollow:
             links.append(canonical)
         self._enqueue_links(links, item, cfg, scope)
+        self._discover_sitemaps(final, item, cfg, scope)
 
         if noindex:
             removed = self._deactivate([url, final, canonical], "noindex", stats)

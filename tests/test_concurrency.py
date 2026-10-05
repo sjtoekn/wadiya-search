@@ -7,6 +7,7 @@ import threading
 import time
 
 from tests.helpers import TempDirCase, make_doc
+from wadiya.crawler.seeds import Seed
 from wadiya.indexer.fts5 import FTS5Indexer
 from wadiya.pipeline import sync_index
 from wadiya.ranking.bm25 import BM25Ranker
@@ -140,3 +141,134 @@ class CrawlerProcessPlusSearchTests(TempDirCase):
         self.assertEqual(len(active_ids) + inactive, self.N)
         self.assertEqual(inactive, self.N // 25)                                              # the interleaved removals all landed
         print(f"\n   [{searches[0]} concurrent searches, 0 errors, {len(active_ids)} active / {inactive} removed, index == active set]")
+
+
+class CrawlerWorkerConcurrencyTests(TempDirCase):
+    """M1: verify crawler worker scheduling and failure isolation."""
+
+    def _crawler(self, max_workers=2, max_total_pages=10):
+        from tests.crawler_fixtures import Env
+
+        class Site:
+            base = "https://example.invalid"
+
+        env = Env(
+            self.settings,
+            Site(),
+            max_workers=max_workers,
+            max_total_pages=max_total_pages,
+        )
+        return env
+
+    def test_different_domains_run_in_parallel(self):
+        env = self._crawler(max_workers=2, max_total_pages=2)
+        crawler = env.crawler(self.storage)
+
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def process(item, scope, stats, run_id):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            barrier.wait(timeout=5)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+        crawler._process = process
+
+        seeds = [
+            Seed("https://a.example/"),
+            Seed("https://b.example/"),
+        ]
+
+        crawler.run(seeds, fresh=False)
+
+        self.assertEqual(peak, 2)
+
+    def test_same_domain_never_runs_concurrently(self):
+        env = self._crawler(max_workers=2, max_total_pages=2)
+        crawler = env.crawler(self.storage)
+
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def process(item, scope, stats, run_id):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+        crawler._process = process
+
+        seeds = [
+            Seed("https://same.example/a"),
+            Seed("https://same.example/b"),
+        ]
+
+        crawler.run(seeds, fresh=False)
+
+        self.assertEqual(peak, 1)
+
+    def test_max_total_pages_is_exact_under_concurrency(self):
+        env = self._crawler(max_workers=4, max_total_pages=5)
+        crawler = env.crawler(self.storage)
+
+        calls = []
+        lock = threading.Lock()
+
+        def process(item, scope, stats, run_id):
+            with lock:
+                calls.append(item.url)
+            time.sleep(0.02)
+
+        crawler._process = process
+
+        seeds = [
+            Seed(f"https://domain{i}.example/")
+            for i in range(10)
+        ]
+
+        crawler.run(seeds, fresh=False)
+
+        self.assertEqual(len(calls), 5)
+
+    def test_worker_failure_does_not_stop_other_workers(self):
+        env = self._crawler(max_workers=2, max_total_pages=3)
+        crawler = env.crawler(self.storage)
+
+        calls = []
+        lock = threading.Lock()
+
+        def process(item, scope, stats, run_id):
+            with lock:
+                calls.append(item.url)
+
+            if item.url.endswith("/fail"):
+                raise RuntimeError("intentional worker failure")
+
+            time.sleep(0.02)
+
+        crawler._process = process
+
+        seeds = [
+            Seed("https://a.example/fail"),
+            Seed("https://b.example/ok"),
+            Seed("https://c.example/ok"),
+        ]
+
+        stats = crawler.run(seeds, fresh=False)
+
+        self.assertEqual(len(calls), 3)
+        self.assertIn("https://a.example/fail", calls)
+        self.assertIn("https://b.example/ok", calls)
+        self.assertIn("https://c.example/ok", calls)
+        self.assertEqual(stats.failed, 1)
